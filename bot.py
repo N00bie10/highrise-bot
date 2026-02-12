@@ -1,134 +1,175 @@
-from highrise import BaseBot, User, ResponseError
-from highrise.models import Emote
-import os
+import asyncio
+from highrise import BaseBot, User
+from highrise.models.emotes import EmoteId
 
-VIP_USERS = set()
-MUSIC_QUEUE = []
+# ------------------------
+# CONFIG
+# ------------------------
+VIP_USERS = set()        # user IDs with VIP privileges
+MUSIC_QUEUE = []         # (username, song) queue
 
-# FREE emotes = safe to use on others
-FREE_EMOTES = {
-    "!wave": Emote.emote_wave,
-    "!punch": Emote.emote_punch,
-    "!laidback": Emote.emote_laidback,
-    "!smooch": Emote.emote_kiss,
+# Basic emotes everyone can use
+BASIC_EMOTES = {
+    "wave": EmoteId.Wave,
+    "punch": EmoteId.Punch,
+    "smooch": EmoteId.Smooch,
+    "worm": EmoteId.Worm,
+    "laidback": EmoteId.Laidback,
 }
 
-# PAID emotes = self only
-PAID_EMOTES = {
-    "!dance": Emote.emote_dance,
-    "!worm": Emote.emote_worm,
+# Advanced emotes (VIPs/mods/owner)
+ADVANCED_EMOTES = {
+    "dance": EmoteId.Dance,
+    "celebrate": EmoteId.Celebrate,
 }
 
+# ------------------------
+# HELPER FUNCTIONS
+# ------------------------
+def can_control(user: User):
+    """Check if user can run VIP/advanced commands"""
+    # Owner or mod or VIP
+    return getattr(user, "is_mod", False) or getattr(user, "is_owner", False) or user.id in VIP_USERS
+
+def parse_target_username(message: str):
+    """Extract @username from command if present"""
+    parts = message.split(" ", 1)
+    if len(parts) < 2:
+        return None
+    target = parts[1].strip()
+    if target.startswith("@"):
+        return target[1:]
+    return None
+
+# ------------------------
+# BOT CLASS
+# ------------------------
 class HighriseRoomBot(BaseBot):
 
-    async def on_start(self, session):
+    async def on_ready(self):
         print("✅ BOT CONNECTED SUCCESSFULLY")
-
-    async def safe_emote(self, emote, target_id=None):
-        try:
-            if target_id:
-                await self.highrise.send_emote(emote, target_id)
-            else:
-                await self.highrise.send_emote(emote)
-        except ResponseError:
-            await self.highrise.send_channel(
-                "❌ That emote can’t be used on that user."
-            )
 
     async def on_chat(self, user: User, message: str):
         msg = message.lower().strip()
-        parts = message.split()
 
-        # ---------------- HELP ----------------
+        # ------------------------
+        # HELP COMMAND
+        # ------------------------
         if msg == "!help":
-            await self.highrise.send_channel(
-                "🆘 Commands:\n"
-                "Free: !wave !punch !laidback !smooch\n"
-                "VIP: !play <song> | !queue\n"
-                "Mods: !addvip @user | !removevip @user"
+            help_text = (
+                "🎮 Commands:\n"
+                "Basic emotes: " + ", ".join(BASIC_EMOTES.keys()) + "\n"
+                "Advanced emotes (VIP/mods/owner): " + ", ".join(ADVANCED_EMOTES.keys()) + "\n"
+                "Music: !play <song> (VIP only)\n"
+                "Queue: !queue\n"
+                "Give emote to another: !<emote> @username (VIP/mods/owner)"
             )
+            await self.highrise.send_channel(help_text)
             return
 
-        # ----------- FREE EMOTES (ALL USERS) -----------
-        if parts[0] in FREE_EMOTES:
-            emote = FREE_EMOTES[parts[0]]
+        # ------------------------
+        # EMOTE COMMANDS
+        # ------------------------
+        if msg.startswith("!"):
+            cmd = msg[1:].split(" ")[0]
 
-            # Target another user
-            if len(parts) > 1 and parts[1].startswith("@"):
-                if user.id not in VIP_USERS:
-                    await self.highrise.send_channel(
-                        "❌ Only VIPs / mods can target others."
-                    )
+            # Check if targeting another user
+            target_name = parse_target_username(msg)
+            target_id = None
+
+            if target_name:
+                room_users = await self.highrise.get_room_users()
+                for u in room_users.content:
+                    if u.username.lower() == target_name.lower():
+                        target_id = u.id
+                        break
+                if not target_id:
+                    await self.highrise.send_channel(f"❌ User @{target_name} not found.")
                     return
 
-                target_name = parts[1][1:].lower()
-                users = await self.highrise.get_room_users()
+            # ------------------------
+            # BASIC EMOTES
+            # ------------------------
+            if cmd in BASIC_EMOTES:
+                try:
+                    if target_id and can_control(user):
+                        await self.highrise.send_emote(BASIC_EMOTES[cmd], target_id)
+                    else:
+                        await self.highrise.send_emote(BASIC_EMOTES[cmd], user.id)
+                except Exception as e:
+                    await self.highrise.send_channel(f"❌ Error: {e}")
+                return
 
-                for u in users.content:
-                    if u.username.lower() == target_name:
-                        await self.safe_emote(emote, u.id)
+            # ------------------------
+            # ADVANCED EMOTES
+            # ------------------------
+            if cmd in ADVANCED_EMOTES:
+                if not can_control(user):
+                    await self.highrise.send_channel(f"❌ {user.username}, only VIPs/mods/owner can use this.")
+                    return
+                try:
+                    if target_id:
+                        await self.highrise.send_emote(ADVANCED_EMOTES[cmd], target_id)
+                    else:
+                        await self.highrise.send_emote(ADVANCED_EMOTES[cmd], user.id)
+                except Exception as e:
+                    await self.highrise.send_channel(f"❌ Error: {e}")
+                return
+
+            # ------------------------
+            # MUSIC COMMANDS (VIP only)
+            # ------------------------
+            if cmd == "play":
+                if not can_control(user):
+                    await self.highrise.send_channel(f"🎵 Music requests are for VIPs/mods/owner only.")
+                    return
+                song = msg[6:].strip()
+                if song:
+                    MUSIC_QUEUE.append((user.username, song))
+                    await self.highrise.send_channel(f"🎶 Added to queue: {song} (requested by {user.username})")
+                return
+
+            if cmd == "queue":
+                if not MUSIC_QUEUE:
+                    await self.highrise.send_channel("📭 Music queue is empty.")
+                    return
+                queue_text = "🎵 Music Queue:\n" + "\n".join(
+                    f"{i+1}. {s} — {u}" for i, (u, s) in enumerate(MUSIC_QUEUE)
+                )
+                await self.highrise.send_channel(queue_text)
+                return
+
+            # ------------------------
+            # VIP MANAGEMENT (Owner only)
+            # ------------------------
+            if cmd == "addvip":
+                if not getattr(user, "is_owner", False):
+                    return
+                target_name = msg.split(" ", 1)[1]
+                room_users = await self.highrise.get_room_users()
+                for u in room_users.content:
+                    if u.username.lower() == target_name.lower():
+                        VIP_USERS.add(u.id)
+                        await self.highrise.send_channel(f"⭐ {u.username} is now a VIP!")
                         return
 
-                await self.highrise.send_channel("❌ User not found.")
-                return
-
-            # Self emote
-            await self.safe_emote(emote, user.id)
-            return
-
-        # ----------- PAID EMOTES (SELF ONLY) -----------
-        if parts[0] in PAID_EMOTES:
-            await self.safe_emote(PAID_EMOTES[parts[0]], user.id)
-            return
-
-        # ---------------- MUSIC ----------------
-        if msg.startswith("!play "):
-            if user.id not in VIP_USERS:
-                await self.highrise.send_channel(
-                    "🎵 Music requests are VIP-only."
-                )
-                return
-
-            song = message[6:].strip()
-            MUSIC_QUEUE.append((user.username, song))
-            await self.highrise.send_channel(
-                f"🎶 Added to queue: {song}"
-            )
-            return
-
-        if msg == "!queue":
-            if not MUSIC_QUEUE:
-                await self.highrise.send_channel("📭 Queue empty.")
-                return
-
-            text = "🎵 Music Queue:\n"
-            for i, (name, song) in enumerate(MUSIC_QUEUE, 1):
-                text += f"{i}. {song} — {name}\n"
-
-            await self.highrise.send_channel(text)
-            return
-
-        # ----------- VIP MANAGEMENT (MOD / OWNER) -----------
-        if msg.startswith("!addvip ") or msg.startswith("!removevip "):
-            users = await self.highrise.get_room_users()
-
-            # Only mods / owner
-            room_user = next((u for u in users.content if u.id == user.id), None)
-            if not room_user or not room_user.is_moderator:
-                return
-
-            target_name = parts[1][1:].lower()
-
-            for u in users.content:
-                if u.username.lower() == target_name:
-                    if msg.startswith("!addvip"):
-                        VIP_USERS.add(u.id)
-                        await self.highrise.send_channel(
-                            f"⭐ {u.username} is now VIP!"
-                        )
-                    else:
-                        VIP_USERS.discard(u.id)
-                        await self.highrise.send_channel(
-                            f"❌ {u.username} removed from VIP."
-                        )
+            if cmd == "removevip":
+                if not getattr(user, "is_owner", False):
                     return
+                target_name = msg.split(" ", 1)[1]
+                room_users = await self.highrise.get_room_users()
+                for u in room_users.content:
+                    if u.username.lower() == target_name.lower():
+                        VIP_USERS.discard(u.id)
+                        await self.highrise.send_channel(f"❌ {u.username} is no longer a VIP.")
+                        return
+
+# ------------------------
+# START BOT
+# ------------------------
+import os
+BOT_TOKEN = os.getenv("API_TOKEN")
+ROOM_ID = os.getenv("ROOM_ID")
+
+bot = HighriseRoomBot()
+asyncio.run(bot.run(BOT_TOKEN, room=ROOM_ID))

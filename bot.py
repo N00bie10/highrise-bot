@@ -168,8 +168,9 @@ class HighriseRoomBot(BaseBot):
 # START BOT
 # ------------------------
 import os
-BOT_TOKEN = os.getenv("API_TOKEN")
-ROOM_ID = os.getenv("ROOM_ID")
+BOT_TOKEN = os.getenv("59a326bf94f286d0c3649e22e49505c66c134e5e6d57983e90fd9eeca721b20b")
+ROOM_ID = os.getenv("693df3b1a855b7d3cd87e0fb")
 
 bot = HighriseRoomBot()
 asyncio.run(bot.run(BOT_TOKEN, room=ROOM_ID))
+
